@@ -1,0 +1,880 @@
+# =============================================================================
+#  EXPORT BOOTH GAME → STANDALONE HTML FILE  (presenter mode)
+#  Run this cell in Colab AFTER autophagy_complete_colab.py has finished.
+#
+#  OUTPUT: booth_game.html — single file, open in any browser, no internet.
+#
+#  FLOW AT THE BOOTH:
+#    1. Show the card registry on screen.
+#    2. Pick a physical patient card at random from your deck.
+#    3. Enter the card number in the dropdown and click "Show results".
+#    4. Screen shows:
+#         · Patient demographics
+#         · How the model decided  (narrative + vote bar + top 3 drivers)
+#         · Model prediction vs GEO ground truth
+#         · Full gene breakdown table
+# =============================================================================
+
+import json, numpy as np, pandas as pd
+from IPython.display import FileLink, display
+
+TOP_GENES = 12   # genes shown in the breakdown table
+
+# ── Gene plain-English names ──────────────────────────────────────────────────
+GENE_PLAIN = {
+    'BECN1':    ('Alarm system',       'Master on-switch — recruits autophagy machinery'),
+    'SQSTM1':   ('Cargo handler',      'Grabs and loads damaged proteins for disposal'),
+    'MTOR':     ('Off-switch (mTOR)',  'Brake pedal — blocks cleanup when active'),
+    'MAP1LC3B': ('Bag lining (LC3B)', 'Lines the autophagosome — standard lab marker'),
+    'ATG5':     ('Bag builder',        'Elongates the double-membrane garbage bag'),
+    'ATG7':     ('Assembly spark',     'Activates the ATG conjugation cascade'),
+    'ATG12':    ('Bag scaffold',       'Structural component of the conjugation complex'),
+    'ATG16L1':  ('Bag coordinator',    'Guides LC3B attachment to the membrane'),
+    'ULK1':     ('Start signal',       'Fires when mTOR releases — ignites cleanup'),
+    'ULK2':     ('Backup starter',     'Redundant initiator kinase alongside ULK1'),
+    'LAMP2':    ('Shredder gate',      'Opens the lysosome for fusion and digestion'),
+    'LAMP1':    ('Lysosome marker',    'Structural lysosome membrane protein'),
+    'CTSD':     ('Shredder blade',     'Main acid protease inside lysosomes'),
+    'CTSB':     ('Shredder blade 2',   'Cathepsin B — lysosomal protease'),
+    'RAB7A':    ('Delivery truck',     'Guides autophagosomes to the lysosome'),
+    'PINK1':    ('Mito sensor',        'Detects damaged mitochondria for mitophagy'),
+    'PRKN':     ('Mito tagger',        'Tags damaged mitochondria for removal'),
+    'HIF1A':    ('Oxygen alarm',       'Emergency autophagy under low oxygen'),
+    'TFEB':     ('Cleanup director',   'Master transcription factor for lysosome genes'),
+    'TP53':     ('Genome guardian',    'Triggers autophagy in response to DNA damage'),
+    'NBR1':     ('Cargo helper',       'Second cargo receptor alongside SQSTM1'),
+    'OPTN':     ('Precision handler',  'Selective receptor for mitophagy'),
+    'STX17':    ('Fusion clasp',       'SNARE protein — locks autophagosome to lysosome'),
+    'PIK3C3':   ('Site marker',        'Marks the nucleation site for phagophore growth'),
+    'ATG13':    ('Relay node',         'Bridges ULK1 to downstream machinery'),
+    'RB1CC1':   ('Scaffold (FIP200)', 'Scaffolds the ULK1 initiation complex'),
+    'ATG3':     ('Lipid conjugator',   'Attaches LC3 to the autophagosome membrane'),
+    'GBA':      ('Lysosome enzyme',    'Glucocerebrosidase — degrades lipid cargo'),
+    'LAMP3':    ('Lysosome surface',   'Late endosomal / lysosomal marker'),
+    'HSPA5':    ('ER stress sensor',   'BiP — ER stress triggers autophagy via this gene'),
+    'AKT1':     ('mTOR activator',     'Activates mTOR — indirect autophagy suppressor'),
+    'FOXO3':    ('Gene driver',        'Transcription factor — activates ATG gene expression'),
+    'RICTOR':   ('mTOR complex 2',     'mTORC2 — regulates AKT to mTOR signalling axis'),
+    'RPTOR':    ('mTOR complex 1',     'mTORC1 — the key autophagy-blocking complex'),
+    'BCL2':     ('Autophagy brake',    'Sequesters BECN1 — blocks autophagy initiation'),
+    'AMBRA1':   ('BECN1 activator',    'Releases BECN1 from dynein to enable initiation'),
+    'ATG4A':    ('LC3 activator',      'Primes LC3 for membrane conjugation'),
+    'ATG4B':    ('LC3 activator 2',    'Primary LC3-processing protease'),
+    'ATG4C':    ('LC3 activator 3',    'LC3 priming enzyme isoform'),
+    'ATG4D':    ('LC3 activator 4',    'LC3 priming enzyme isoform'),
+    'MAP1LC3A': ('Bag lining A',       'LC3A isoform — autophagosome membrane marker'),
+    'MAP1LC3C': ('Bag lining C',       'LC3C isoform — selective cargo autophagy'),
+    'GABARAP':  ('GABARAP',            'LC3 family — autophagosome closure'),
+    'GABARAPL1':('GABARAP-L1',         'LC3 family — autophagosome maturation'),
+    'GABARAPL2':('GABARAP-L2',         'LC3 family — autophagosome to lysosome fusion'),
+    'UVRAG':    ('Maturation factor',  'Promotes autophagosome to lysosome fusion'),
+    'PIK3R4':   ('PI3K partner',       'Regulatory subunit of the PI3K complex'),
+    'CALCOCO2': ('Cargo receptor',     'NDP52 — selective receptor for bacterial cargo'),
+    'TAX1BP1':  ('Cargo receptor 2',   'Selective autophagy receptor for ubiquitinated cargo'),
+    'WDFY3':    ('Cargo scaffold',     'Scaffolds selective autophagy complexes'),
+    'ALFY':     ('Cargo scaffold 2',   'Aggregaphagy scaffold for protein aggregates'),
+    'RAB5A':    ('Early endosome',     'Upstream endosomal marker — feeds into autophagy'),
+    'VPS34':    ('PI3K catalytic',     'Core lipid kinase — generates PI3P at phagophore'),
+    'VPS11':    ('HOPS complex',       'Tethering complex for lysosome fusion'),
+    'VPS16':    ('HOPS complex 2',     'Core HOPS subunit'),
+    'VPS18':    ('HOPS scaffold',      'HOPS scaffold subunit'),
+    'VPS33A':   ('HOPS SM protein',    'SNARE chaperone in HOPS tethering complex'),
+    'VPS39':    ('HOPS Rab7 binder',   'RAB7 effector — recruits late endosomes'),
+    'VPS41':    ('HOPS terminal',      'Terminal HOPS subunit — lysosome recognition'),
+    'BNIP3':    ('Hypoxia sensor',     'Mitophagy receptor under low oxygen'),
+    'BNIP3L':   ('Mito receptor',      'NIX — mitophagy receptor on mitochondria'),
+    'FUNDC1':   ('Hypoxia mitophagy',  'Mitophagy receptor under hypoxic conditions'),
+    'DNM1L':    ('Mito splitter',      'DRP1 — fissions mitochondria before mitophagy'),
+    'MFN1':     ('Mito fuser',         'Mitofusin 1 — mitochondrial fusion GTPase'),
+    'MFN2':     ('Mito fuser 2',       'Mitofusin 2 — also a mitophagy receptor'),
+    'SNAP29':   ('Fusion SNARE',       'Non-membrane SNARE — essential for fusion'),
+    'VAMP8':    ('Fusion partner',     'Lysosomal SNARE — completes fusion event'),
+    'ZKSCAN3':  ('Cleanup repressor',  'Represses TFEB-driven cleanup genes'),
+    'HEXA':     ('Lysosome enzyme 2',  'Hexosaminidase A — lysosomal glycosidase'),
+    'KIAA0226': ('Rubicon',            'Negative regulator — blocks autophagosome maturation'),
+    'ATG10':    ('Conjugation bridge', 'E2-like enzyme in ATG12 to ATG5 conjugation'),
+    'ATG101':   ('ULK member',         'Stabilises ATG13 in the ULK1 complex'),
+    'DDIT3':    ('Stress responder',   'CHOP — links ER stress to autophagy'),
+    'EIF2AK4':  ('Stress kinase',      'GCN2 — activates autophagy under amino acid stress'),
+    'MAPK1':    ('Stress MAPK',        'ERK2 — modulates autophagy via mTOR signalling'),
+    'RPS6KB1':  ('mTOR readout',       'S6K1 — downstream mTOR target, suppresses ULK1'),
+}
+
+# ── Gene direction: does HIGH expression push toward sick? ────────────────────
+def gene_directions(X_corr, y, gene_cols):
+    df           = X_corr[gene_cols].copy()
+    df['_y']     = y
+    sick_mean    = df[df['_y'] == 1][gene_cols].mean()
+    healthy_mean = df[df['_y'] == 0][gene_cols].mean()
+    return (sick_mean > healthy_mean).to_dict()
+
+# ── Gene breakdown per sample ─────────────────────────────────────────────────
+def build_gene_breakdown(sample_id, X_corr, rf, gene_cols, directions):
+    if sample_id not in X_corr.index:
+        return []
+    importances = rf.feature_importances_
+    top_idx     = np.argsort(importances)[::-1][:TOP_GENES]
+    row         = X_corr.loc[sample_id]
+    tmp = []
+    for idx in top_idx:
+        gene         = gene_cols[idx]
+        imp          = float(importances[idx])
+        z            = float(row.get(gene, 0.0))
+        high_is_sick = bool(directions.get(gene, True))
+        pushes_sick  = (z > 0) if high_is_sick else (z < 0)
+        strength     = abs(z) * imp
+        info         = GENE_PLAIN.get(gene, (gene, ''))
+        tmp.append({
+            'gene':       gene,
+            'plainName':  info[0],
+            'plainRole':  info[1],
+            'zScore':     round(z, 2),
+            'pushesSick': pushes_sick,
+            'importance': round(imp * 100, 1),
+            'strength':   strength,
+        })
+    max_str = max((b['strength'] for b in tmp), default=1) or 1
+    for b in tmp:
+        b['pctBar'] = int(min(100, b['strength'] / max_str * 100))
+        del b['strength']
+    return tmp
+
+# ── Reasoning summary ─────────────────────────────────────────────────────────
+def build_reasoning(gene_breakdown, model_pred_sick):
+    sick_w    = sum(b['importance'] * b['pctBar'] / 100
+                    for b in gene_breakdown if b['pushesSick'])
+    healthy_w = sum(b['importance'] * b['pctBar'] / 100
+                    for b in gene_breakdown if not b['pushesSick'])
+    total_w   = sick_w + healthy_w or 1
+
+    sick_pct    = int(round(sick_w / total_w * 100))
+    healthy_pct = 100 - sick_pct
+    sick_count    = sum(1 for b in gene_breakdown if b['pushesSick'])
+    healthy_count = len(gene_breakdown) - sick_count
+
+    top3     = sorted(gene_breakdown, key=lambda b: b['pctBar'], reverse=True)[:3]
+    top_gene = top3[0] if top3 else None
+
+    if top_gene:
+        direction = "elevated" if top_gene['zScore'] > 0 else "suppressed"
+        push      = "toward disease" if top_gene['pushesSick'] else "toward healthy"
+        if model_pred_sick:
+            narrative = (
+                f"The AI model predicted this patient is sick. "
+                f"{sick_count} of {len(gene_breakdown)} genes pushed toward disease, "
+                f"carrying {sick_pct}% of the combined signal weight. "
+                f"The strongest driver was {top_gene['gene']} ({top_gene['plainName']}), "
+                f"which was {direction} (activity level = {top_gene['zScore']:+.1f}) "
+                f"and pushed {push}."
+            )
+        else:
+            narrative = (
+                f"The AI model predicted this patient is healthy. "
+                f"{healthy_count} of {len(gene_breakdown)} genes pushed toward healthy, "
+                f"carrying {healthy_pct}% of the combined signal weight. "
+                f"The strongest driver was {top_gene['gene']} ({top_gene['plainName']}), "
+                f"which was {direction} (activity level = {top_gene['zScore']:+.1f}) "
+                f"and pushed {push}."
+            )
+    else:
+        narrative = "Insufficient gene data to generate a narrative."
+
+    return {
+        'sickPct':     sick_pct,
+        'healthyPct':  healthy_pct,
+        'topDrivers':  top3,
+        'narrative':   narrative,
+        'geneCount':   {'sick': sick_count, 'healthy': healthy_count},
+    }
+
+# ── Ground truth lookups ──────────────────────────────────────────────────────
+def build_gt_lookup(full_df, gse_cache, datasets_config, PHENO_CONFIG):
+    binary = {
+        sid: ('Sick' if full_df.loc[sid, 'Status'] == 1 else 'Healthy')
+        for sid in full_df.index
+    }
+    label = {}
+    for ds in datasets_config:
+        cfg     = PHENO_CONFIG[ds['id']]
+        gse_obj = gse_cache.get(ds['id'])
+        if gse_obj is None:
+            continue
+        meta = gse_obj.phenotype_data
+        if cfg['status_col'] in meta.columns:
+            for sid, val in meta[cfg['status_col']].items():
+                label[sid] = str(val).strip()
+    return binary, label
+
+# ── Constants ─────────────────────────────────────────────────────────────────
+DATASET_TISSUE = {
+    'GSE63060':  'Blood sample — gene activity measured from a single blood draw',
+    'GSE63061':  'Blood sample — gene activity measured from a single blood draw',
+    'GSE65391':  'Blood sample — gene activity measured by RNA sequencing',
+    'GSE11909':  'Blood sample — gene activity measured from a single blood draw',
+    'GSE109887': 'Brain tissue — donated for Alzheimer\'s research',
+}
+
+# ── Uniform card fields — always shown, "—" if not available ─────────────────
+# Every card shows exactly these 4 fields in this order.
+# Race/Ethnicity merges both fields into one row.
+UNIFORM_CARD_FIELDS = [
+    ('Age',            ['age']),
+    ('Sex',            ['gender']),
+    ('Race/Ethnicity', ['race', 'ethnicity']),
+    ('Sample source',  []),   # always filled from DATASET_TISSUE
+]
+
+# ── Translate raw GEO diagnosis labels into plain English ─────────────────────
+def translate_diagnosis(raw):
+    """Convert raw GEO status strings to plain-English display labels."""
+    mapping = {
+        'ad':                          "Alzheimer's Disease",
+        'alzheimer':                   "Alzheimer's Disease",
+        "alzheimer's":                 "Alzheimer's Disease",
+        'mci':                         "MCI (Mild Cognitive Impairment)",
+        'borderline mci':              "Borderline MCI (Mild Cognitive Impairment)",
+        'ctl':                         "Healthy volunteer",
+        'ctl to ad':                   "Healthy volunteer (converted to AD)",
+        'control':                     "Healthy volunteer",
+        'healthy':                     "Healthy volunteer",
+        'sle':                         "Lupus (SLE)",
+        'other':                       "Other",
+    }
+    return mapping.get(raw.lower().strip(), raw)
+
+# ── Build card data ───────────────────────────────────────────────────────────
+print("Building card data for HTML export...")
+
+directions          = gene_directions(X_corr, y, gene_cols)
+gt_binary, gt_label = build_gt_lookup(
+    full_df, gse_cache, datasets_config, PHENO_CONFIG
+)
+rf.fit(X_blood, y_blood)
+
+cards = []
+for i, (sample_id, row) in enumerate(final_card_df.iterrows(), start=1):
+
+    if sample_id in X_corr.index:
+        sr               = X_corr.loc[[sample_id], gene_cols]
+        proba            = rf.predict_proba(sr)[0]
+        model_pred_sick  = bool(rf.predict(sr)[0] == 1)
+        model_confidence = round(float(max(proba)) * 100, 1)
+    else:
+        model_pred_sick  = gt_binary.get(sample_id, 'Healthy') == 'Sick'
+        model_confidence = 55.0
+
+    dataset = str(row.get('dataset', ''))
+
+    # ── Build uniform 4-field bio dict ────────────────────────────────────
+    bio = {}
+    for display_label, source_keys in UNIFORM_CARD_FIELDS:
+        if display_label == 'Sample source':
+            bio[display_label] = DATASET_TISSUE.get(dataset, 'Blood sample')
+            continue
+        # try each source key in order, take first non-empty value
+        found = None
+        for key in source_keys:
+            val = row.get(key)
+            if val is not None and not (isinstance(val, float) and np.isnan(val)):
+                s = str(val).strip()
+                if s.lower() not in ('', 'nan', 'none', 'not applicable',
+                                     'data not available', 'not reported',
+                                     'race not reported', 'ethnicity not reported'):
+                    found = s
+                    break
+        bio[display_label] = found if found else '\u2014'   # em-dash for missing
+
+    breakdown = build_gene_breakdown(
+        sample_id, X_corr, rf, gene_cols, directions
+    )
+    reasoning = build_reasoning(breakdown, model_pred_sick)
+
+    cards.append({
+        'cardNum':          i,
+        'sampleId':         sample_id,
+        'dataset':          dataset,
+        'tissue':           DATASET_TISSUE.get(dataset, 'Blood'),
+        'cohort':           str(row.get('cohort', '')),
+        'bio':              bio,
+        'groundTruthSick':  gt_binary.get(sample_id, 'Healthy') == 'Sick',
+        'groundTruthLabel': translate_diagnosis(
+            gt_label.get(sample_id, str(row.get('status', 'Unknown')))
+        ),
+        'modelPredSick':    model_pred_sick,
+        'modelConfidence':  model_confidence,
+        'geneBreakdown':    breakdown,
+        'reasoning':        reasoning,
+    })
+
+print(f"  {len(cards)} cards prepared.")
+cards_json = json.dumps(cards)
+
+# ── HTML template ─────────────────────────────────────────────────────────────
+HTML_TEMPLATE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AutophagyNet \u00b7 Booth</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+     background:#F0EEE8;padding:24px;min-height:100vh}
+h1{font-size:26px;font-weight:600;color:#2C2C2A;margin-bottom:4px}
+.subtitle{font-size:15px;color:#888;margin-bottom:24px}
+
+/* Registry */
+.registry{display:grid;grid-template-columns:repeat(auto-fill,minmax(185px,1fr));
+          gap:12px;margin-bottom:28px}
+.reg-card{background:#fff;border:0.5px solid #D3D1C7;border-radius:12px;overflow:hidden;
+          box-shadow:0 1px 3px rgba(0,0,0,.06)}
+.reg-head{background:#2C2C2A;padding:10px 14px;display:flex;
+          align-items:center;justify-content:space-between}
+.reg-num{font-size:20px;font-weight:600;color:#fff}
+.reg-id{font-size:10px;color:#888;font-family:monospace}
+.reg-ds{padding:6px 14px;background:#F9F8F5;border-bottom:0.5px solid #E8E6DF;
+        font-size:11px;color:#888;line-height:1.6}
+.reg-ds strong{color:#2C2C2A;font-weight:600;display:block;font-size:12px}
+.reg-bio{padding:8px 14px}
+.bio-row{display:flex;justify-content:space-between;padding:4px 0;
+         border-bottom:0.5px solid #F1EFE8;font-size:12px}
+.bio-row:last-child{border-bottom:none}
+.bio-l{color:#888}
+.bio-v{font-weight:500;color:#2C2C2A;text-align:right;max-width:115px;
+       overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* Controls */
+.controls{background:#fff;border:0.5px solid #D3D1C7;border-radius:14px;
+          padding:18px 22px;margin-bottom:22px;display:flex;
+          gap:14px;flex-wrap:wrap;align-items:flex-end;
+          box-shadow:0 1px 3px rgba(0,0,0,.05)}
+.ctrl-group{display:flex;flex-direction:column;gap:6px}
+.ctrl-label{font-size:12px;font-weight:600;color:#5F5E5A;
+            text-transform:uppercase;letter-spacing:.05em}
+select{height:40px;padding:0 12px;border:0.5px solid #D3D1C7;
+       border-radius:8px;font-size:14px;color:#2C2C2A;
+       background:#fff;min-width:260px;cursor:pointer}
+select:focus{outline:none;border-color:#534AB7}
+.btn{height:40px;padding:0 20px;border-radius:8px;font-size:14px;
+     font-weight:500;cursor:pointer;border:0.5px solid;transition:all .1s}
+.btn-primary{background:#534AB7;color:#fff;border-color:#534AB7}
+.btn-primary:hover{background:#3C3489}
+.btn-warn{background:#fff;color:#633806;border-color:#BA7517}
+.btn-warn:hover{background:#FAEEDA}
+.btn-sec{background:#fff;color:#5F5E5A;border-color:#D3D1C7}
+.btn-sec:hover{background:#F9F8F5}
+
+/* Dashboard */
+.dash{background:#fff;border:0.5px solid #D3D1C7;border-radius:16px;
+      overflow:hidden;margin-bottom:22px;display:none;
+      box-shadow:0 2px 8px rgba(0,0,0,.07)}
+.dash-header{background:linear-gradient(135deg,#2C2C2A 0%,#444441 100%);
+             padding:16px 22px;display:flex;align-items:center;gap:12px}
+.card-badge{background:rgba(255,255,255,.15);color:#fff;border-radius:8px;
+            padding:4px 12px;font-size:14px;font-weight:600;border:1px solid rgba(255,255,255,.2)}
+.dash-title{font-size:15px;font-weight:500;color:#fff;flex:1}
+.pill{font-size:11px;padding:3px 10px;border-radius:12px;font-weight:500;
+      background:rgba(255,255,255,.15);color:#fff}
+
+/* Demographics band */
+.demo-band{padding:14px 22px;border-bottom:0.5px solid #E8E6DF;
+           background:#FDFCFA;display:flex;flex-wrap:wrap;gap:0}
+.demo-lbl{font-size:11px;font-weight:600;color:#888;text-transform:uppercase;
+          letter-spacing:.06em;margin-bottom:6px;width:100%}
+.demo-item{font-size:14px;color:#5F5E5A;margin-right:24px;
+           white-space:nowrap;line-height:2.4}
+.demo-item strong{color:#2C2C2A;font-weight:600}
+
+/* Sections */
+.section{padding:20px 22px;border-bottom:0.5px solid #E8E6DF}
+.section:last-child{border-bottom:none}
+.sec-label{font-size:11px;font-weight:700;color:#534AB7;text-transform:uppercase;
+           letter-spacing:.08em;margin-bottom:14px;
+           display:flex;align-items:center;gap:8px}
+.sec-label::after{content:'';flex:1;height:1px;background:#E8E6DF}
+
+/* Reasoning */
+.reasoning-narrative{background:#EEEDFE;border-left:4px solid #534AB7;
+                     border-radius:0 10px 10px 0;padding:14px 18px;
+                     font-size:15px;color:#2C2C2A;line-height:1.7;
+                     margin-bottom:18px;font-weight:500}
+.reasoning-bullets{list-style:none;margin-bottom:18px;
+                   display:flex;flex-direction:column;gap:8px}
+.reasoning-bullets li{display:flex;align-items:flex-start;gap:10px;
+                      font-size:14px;color:#2C2C2A;line-height:1.6}
+.bullet-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;margin-top:6px}
+.bullet-dot-sick{background:#E24B4A}
+.bullet-dot-healthy{background:#1D9E75}
+.bullet-dot-neutral{background:#534AB7}
+.reasoning-mismatch{background:#FEF0E6;border:1px solid #F0997B;border-radius:10px;
+                    padding:14px 18px;margin-top:14px}
+.mismatch-title{font-size:13px;font-weight:700;color:#993C1D;margin-bottom:8px;
+                display:flex;align-items:center;gap:6px}
+.mismatch-bullets{list-style:none;display:flex;flex-direction:column;gap:6px}
+.mismatch-bullets li{font-size:13px;color:#712B13;line-height:1.55;
+                     display:flex;align-items:flex-start;gap:8px}
+.mismatch-bullets li::before{content:'\u2192';flex-shrink:0;color:#D85A30;font-weight:600}
+
+/* Vote bar */
+.vote-bar-wrap{margin-bottom:18px;
+               background:#F9F8F5;border-radius:10px;padding:14px 16px}
+.vote-bar-title{font-size:12px;font-weight:600;color:#5F5E5A;margin-bottom:10px;
+                text-transform:uppercase;letter-spacing:.05em}
+.vote-label-row{display:flex;justify-content:space-between;
+                font-size:13px;font-weight:600;margin-bottom:7px}
+.lbl-sick{color:#A32D2D}
+.lbl-healthy{color:#27500A}
+.vote-track{height:20px;border-radius:10px;overflow:hidden;
+            display:flex;background:#EAF3DE}
+.vote-sick{background:#E24B4A;height:100%;display:flex;align-items:center;
+           justify-content:center;font-size:11px;font-weight:700;color:#fff}
+.vote-healthy{background:#1D9E75;height:100%;flex:1;display:flex;
+              align-items:center;justify-content:center;
+              font-size:11px;font-weight:700;color:#fff}
+.vote-counts{display:flex;justify-content:space-between;
+             font-size:12px;color:#888;margin-top:7px}
+
+/* Driver cards */
+.top-drivers{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+.driver-card{border:0.5px solid #D3D1C7;border-radius:12px;padding:14px 15px;
+             background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.04)}
+.driver-rank{font-size:10px;font-weight:700;color:#888;text-transform:uppercase;
+             letter-spacing:.07em;margin-bottom:6px}
+.driver-gene{font-size:17px;font-weight:700;font-family:monospace;
+             color:#2C2C2A;margin-bottom:3px}
+.driver-plain{font-size:13px;font-weight:600;color:#534AB7;margin-bottom:5px}
+.driver-role{font-size:12px;color:#5F5E5A;line-height:1.45;margin-bottom:10px}
+.driver-z{font-size:14px;font-weight:700}
+.zpos{color:#A32D2D}
+.zneg{color:#0C447C}
+.driver-push{font-size:12px;font-weight:600;margin-top:4px;
+             padding:3px 8px;border-radius:6px;display:inline-block}
+.push-s{color:#A32D2D;background:#FCEBEB}
+.push-h{color:#27500A;background:#EAF3DE}
+
+/* Comparison */
+.comparison{display:flex;gap:14px;flex-wrap:wrap}
+.comp-card{flex:1;min-width:170px;border:2px solid #D3D1C7;
+           border-radius:12px;padding:16px 18px}
+.comp-card.match{border-color:#1D9E75;background:#F0FBF6}
+.comp-card.mismatch{border-color:#E24B4A;background:#FEF6F6}
+.comp-card.neutral{border-color:#B4B2A9;background:#F9F8F5}
+.comp-label{font-size:11px;font-weight:700;color:#888;
+            text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px}
+.comp-value{font-size:20px;font-weight:600;color:#2C2C2A;margin-bottom:4px}
+.comp-sub{font-size:12px;color:#5F5E5A;margin-bottom:10px}
+.comp-icon{font-size:26px;font-weight:700}
+.ic-m{color:#1D9E75}
+.ic-x{color:#E24B4A}
+.ic-n{color:#888}
+
+/* Outcome banner */
+.outcome-banner{padding:14px 22px;border-bottom:0.5px solid #E8E6DF}
+.outcome-hl{font-size:16px;font-weight:700;margin-bottom:3px}
+.outcome-sub{font-size:13px;opacity:.85}
+.o-correct{background:#EAF3DE;color:#27500A}
+.o-wrong{background:#FCEBEB;color:#A32D2D}
+
+/* Gene table — unchanged per spec */
+.gene-hint{font-size:12px;color:#B4B2A9;margin-bottom:12px;line-height:1.5}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{padding:7px 9px;text-align:left;font-size:10px;font-weight:600;
+   color:#888;text-transform:uppercase;background:#F9F8F5;
+   border-bottom:1px solid #D3D1C7}
+td{padding:7px 9px;border-bottom:0.5px solid #E8E6DF}
+tr:last-child td{border-bottom:none}
+.gsym{font-family:monospace;font-weight:700;color:#2C2C2A;white-space:nowrap}
+.gplain{font-weight:600;color:#3C3489}
+.grole{color:#5F5E5A;max-width:190px}
+.zp{color:#A32D2D;font-weight:700}
+.zn{color:#0C447C;font-weight:700}
+.bar-t{width:90px;height:7px;background:#F1EFE8;border-radius:4px;
+       overflow:hidden;display:inline-block;vertical-align:middle}
+.bar-s{height:100%;border-radius:4px;background:#E24B4A;display:block}
+.bar-h{height:100%;border-radius:4px;background:#1D9E75;display:block}
+.dir-s{color:#A32D2D;font-size:11px;font-weight:600}
+.dir-h{color:#27500A;font-size:11px;font-weight:600}
+.imp-cell{color:#888;text-align:right}
+
+/* Summary */
+.summary{background:#fff;border:0.5px solid #D3D1C7;border-radius:16px;
+         overflow:hidden;margin-bottom:22px;display:none;
+         box-shadow:0 2px 8px rgba(0,0,0,.07)}
+.sum-head{background:#2C2C2A;padding:16px 22px}
+.sum-head h2{font-size:18px;font-weight:600;color:#fff}
+.sum-head p{font-size:13px;color:#888;margin-top:3px}
+.stat-grid{display:grid;grid-template-columns:repeat(3,1fr);
+           border-bottom:0.5px solid #E8E6DF}
+.stat-cell{padding:16px 20px;border-right:0.5px solid #E8E6DF}
+.stat-cell:last-child{border-right:none}
+.stat-label{font-size:12px;color:#888;margin-bottom:5px}
+.stat-num{font-size:26px;font-weight:600}
+.stat-sub{font-size:13px;color:#888}
+.log-wrap{padding:18px 22px}
+</style>
+</head>
+<body>
+
+<h1>AutophagyNet \u00b7 Booth</h1>
+<p class="subtitle">Presenter mode \u2014 pick a patient card and reveal the autophagy analysis</p>
+
+<div id="registry" class="registry"></div>
+
+<div class="controls">
+  <div class="ctrl-group">
+    <span class="ctrl-label">Patient card</span>
+    <select id="cardSel"></select>
+  </div>
+  <button class="btn btn-primary" onclick="showCard()">Show results</button>
+  <button class="btn btn-warn"    onclick="showSummary()">Session summary</button>
+  <button class="btn btn-sec"     onclick="resetSession()">Reset</button>
+</div>
+
+<div class="dash" id="dash"></div>
+<div class="summary" id="summary"></div>
+
+<script>
+const CARDS = CARDS_JSON_PLACEHOLDER;
+let session = {total:0, correct:0, log:[]};
+
+function buildRegistry(){
+  const reg = document.getElementById('registry');
+  const sel = document.getElementById('cardSel');
+  CARDS.forEach(c => {
+    const bioHtml = Object.entries(c.bio).map(([k,v])=>
+      `<div class="bio-row"><span class="bio-l">${k}</span>
+       <span class="bio-v">${v}</span></div>`
+    ).join('') || '<div style="font-size:11px;color:#B4B2A9;padding:4px 0">No bio data available</div>';
+    reg.innerHTML += `
+      <div class="reg-card">
+        <div class="reg-head">
+          <span class="reg-num">Card #${c.cardNum}</span>
+          <span class="reg-id">${c.sampleId.slice(0,12)}</span>
+        </div>
+        <div class="reg-ds"><strong>${c.dataset}</strong><br>${c.tissue}</div>
+        <div class="reg-bio">${bioHtml}</div>
+      </div>`;
+    const age  = c.bio['Age']||'';
+    const sex  = c.bio['Sex']||'';
+    const hint = [age,sex].filter(Boolean).join(' \u00b7 ');
+    const opt  = document.createElement('option');
+    opt.value  = c.cardNum;
+    opt.textContent = `Card #${c.cardNum}${hint?' \u2014 '+hint:''}`;
+    sel.appendChild(opt);
+  });
+}
+
+function showCard(){
+  const num  = parseInt(document.getElementById('cardSel').value);
+  const card = CARDS.find(c=>c.cardNum===num);
+  if(!card) return;
+  session.total++;
+  const match = card.modelPredSick === card.groundTruthSick;
+  if(match) session.correct++;
+  session.log.push({cardNum:card.cardNum, sampleId:card.sampleId,
+    modelLabel:card.modelPredSick?'Sick':'Healthy',
+    truthLabel:card.groundTruthLabel, match});
+  renderDash(card, match);
+}
+
+function renderDash(card, match){
+  const el = document.getElementById('dash');
+  el.style.display='block';
+  document.getElementById('summary').style.display='none';
+
+  // demo items — exclude Sample source (shown separately in its own line)
+  const demoEntries = Object.entries(card.bio).filter(([k])=>k!=='Sample source');
+  const demoItems = demoEntries.map(([k,v])=>
+    `<span class="demo-item"><strong>${k}:</strong> ${v}</span>`
+  ).join('') || '<span class="demo-item" style="color:#888">No demographics available</span>';
+  const sampleSource = card.bio['Sample source'] || card.tissue || '';
+
+  const r       = card.reasoning;
+  const sp      = r.sickPct;
+  const hp      = r.healthyPct;
+
+  const voteBar = `
+    <div class="vote-bar-wrap">
+      <div class="vote-label-row">
+        <span class="lbl-sick">Toward disease &nbsp;${sp}%</span>
+        <span class="lbl-healthy">${hp}% &nbsp;Toward healthy</span>
+      </div>
+      <div class="vote-track">
+        <div class="vote-sick"  style="width:${sp}%">${sp>12?sp+'%':''}</div>
+        <div class="vote-healthy">${hp>12?hp+'%':''}</div>
+      </div>
+      <div class="vote-counts">
+        <span>${r.geneCount.sick} gene${r.geneCount.sick!==1?'s':''} pointing toward disease</span>
+        <span>${r.geneCount.healthy} gene${r.geneCount.healthy!==1?'s':''} pointing toward healthy</span>
+      </div>
+    </div>`;
+
+  const driverCards = r.topDrivers.map((d,i)=>{
+    const zc  = d.zScore>0?'zpos':'zneg';
+    const za  = d.zScore>0?'\u2191':'\u2193';
+    const pc  = d.pushesSick?'push-s':'push-h';
+    const pt  = d.pushesSick?'\u2191 Points toward disease':'\u2193 Points toward healthy';
+    const rk  = ['Top driver','2nd driver','3rd driver'][i];
+    return `<div class="driver-card">
+      <div class="driver-rank">${rk}</div>
+      <div class="driver-gene">${d.gene}</div>
+      <div class="driver-plain">${d.plainName}</div>
+      <div class="driver-role">${d.plainRole}</div>
+      <div class="driver-z ${zc}">${za} z\u202f=\u202f${Math.abs(d.zScore)}</div>
+      <div class="driver-push ${pc}">${pt}</div>
+    </div>`;
+  }).join('');
+
+  function compCard(label,value,sub,cls,iconType){
+    const ic = iconType==='match'?'ic-m':iconType==='mismatch'?'ic-x':'ic-n';
+    const sym= iconType==='match'?'\u2713':iconType==='mismatch'?'\u2717':'\u2014';
+    return `<div class="comp-card ${cls}">
+      <div class="comp-label">${label}</div>
+      <div class="comp-value">${value}</div>
+      <div class="comp-sub">${sub}</div>
+      <div class="comp-icon ${ic}">${sym}</div>
+    </div>`;
+  }
+
+  const modelCard = compCard(
+    'AI model prediction',
+    card.modelPredSick?'Sick':'Healthy',
+    'Confidence: '+card.modelConfidence+'%',
+    match?'match':'mismatch', match?'match':'mismatch'
+  );
+  const truthCard = compCard(
+    'Confirmed diagnosis',
+    card.groundTruthLabel,
+    'Dataset: '+card.dataset,
+    'neutral','neutral'
+  );
+
+  const outCls = match?'o-correct':'o-wrong';
+  const outHL  = match?'AI model matches confirmed diagnosis'
+                      :'AI model does not match confirmed diagnosis';
+  const outSub = match
+    ?'The autophagy gene signature correctly identified this patient.'
+    :'The autophagy gene signature gave a different answer from the clinical record \u2014 worth discussing why.';
+
+  const geneRows = card.geneBreakdown.map(b=>{
+    const zc = b.zScore>0?'zp':'zn';
+    const za = b.zScore>0?'\u2191':'\u2193';
+    const bc = b.pushesSick?'bar-s':'bar-h';
+    const dc = b.pushesSick?'dir-s':'dir-h';
+    const dt = b.pushesSick?'\u2191 Toward disease':'\u2193 Toward healthy';
+    return `<tr>
+      <td><span class="gsym">${b.gene}</span></td>
+      <td><span class="gplain">${b.plainName}</span></td>
+      <td class="grole">${b.plainRole}</td>
+      <td><span class="${zc}">${za} ${Math.abs(b.zScore)}</span></td>
+      <td><span class="bar-t"><span class="${bc}" style="width:${b.pctBar}%"></span></span></td>
+      <td><span class="${dc}">${dt}</span></td>
+      <td class="imp-cell">${b.importance}%</td>
+    </tr>`;
+  }).join('');
+
+  // ── verbose bullet points for reasoning section ──────────────────────
+  const bulletData = [
+    {
+      dotCls: r.sickPct >= 50 ? 'bullet-dot-sick' : 'bullet-dot-healthy',
+      text: `<strong>${r.sickPct >= 50 ? 'Most genes pointed toward disease' : 'Most genes pointed toward healthy'}.</strong>
+             Out of ${r.geneCount.sick + r.geneCount.healthy} autophagy genes examined,
+             <strong>${r.geneCount.sick}</strong> pointed toward disease and
+             <strong>${r.geneCount.healthy}</strong> pointed toward healthy.
+             The disease-pointing genes carried <strong>${r.sickPct}%</strong> of the combined signal weight.`
+    },
+    {
+      dotCls: 'bullet-dot-neutral',
+      text: `<strong>The strongest driver was ${r.topDrivers[0]?.gene} (${r.topDrivers[0]?.plainName}).</strong>
+             This gene's activity level was
+             ${r.topDrivers[0]?.zScore > 0 ? 'higher than average' : 'lower than average'}
+             (activity level = ${r.topDrivers[0]?.zScore > 0 ? '+' : ''}${r.topDrivers[0]?.zScore})
+             — which the model interprets as
+             ${r.topDrivers[0]?.pushesSick ? 'a sign of disease. ' : 'a healthy signal. '}
+             ${r.topDrivers[0]?.plainRole}.`
+    },
+    {
+      dotCls: 'bullet-dot-neutral',
+      text: `<strong>The second driver was ${r.topDrivers[1]?.gene} (${r.topDrivers[1]?.plainName}).</strong>
+             Activity level = ${r.topDrivers[1]?.zScore > 0 ? '+' : ''}${r.topDrivers[1]?.zScore},
+             pushing ${r.topDrivers[1]?.pushesSick ? 'toward disease' : 'toward healthy'}.
+             ${r.topDrivers[1]?.plainRole}.`
+    },
+    {
+      dotCls: 'bullet-dot-neutral',
+      text: `<strong>Confidence: ${card.modelConfidence}%.</strong>
+             ${card.modelConfidence >= 75
+               ? 'The model was highly confident in this prediction — the gene pattern was clear and consistent.'
+               : card.modelConfidence >= 60
+                 ? 'The model had moderate confidence. The gene pattern showed a lean in one direction but some conflicting signals were present.'
+                 : 'The model had low confidence. The gene signals were mixed and borderline, making this a difficult case.'}`
+    },
+  ];
+
+  const bulletsHtml = `<ul class="reasoning-bullets">${
+    bulletData.map(b => `<li>
+      <span class="bullet-dot ${b.dotCls}"></span>
+      <span>${b.text}</span>
+    </li>`).join('')
+  }</ul>`;
+
+  // ── mismatch explanation (only shown when model is wrong) ─────────────
+  const mismatchHtml = !match ? `
+    <div class="reasoning-mismatch">
+      <div class="mismatch-title">\u26a0 Why might the model have been wrong?</div>
+      <ul class="mismatch-bullets">
+        <li>Autophagy gene signals in blood don't always perfectly reflect what is happening in the affected organ (such as the brain). A patient can show disease in one tissue while their blood gene pattern looks relatively normal.</li>
+        <li>The model was trained to detect a binary sick/healthy pattern across multiple diseases. Some individual patients fall in a grey zone — particularly those with early-stage disease, MCI (Mild Cognitive Impairment), or conditions that overlap biologically.</li>
+        <li>Gene expression measured from blood is influenced by many factors beyond disease: age, medications, inflammation from unrelated causes, and even time of day of the blood draw. These can mask or mimic disease signals.</li>
+        <li>The Random Forest model uses population-level gene importance. For this specific patient, their individual gene pattern may be unusual even within their disease group — which is exactly what makes personalised medicine so challenging.</li>
+      </ul>
+    </div>` : '';
+
+  el.innerHTML = `
+    <div class="dash-header">
+      <span class="card-badge">Card #${card.cardNum}</span>
+      <span class="dash-title">Sample&nbsp;${card.sampleId}</span>
+      <span class="pill">${card.dataset}</span>
+    </div>
+
+    <div class="demo-band">
+      <div class="demo-lbl">Patient demographics</div>
+      ${demoItems}
+      <div style="width:100%;margin-top:8px;padding-top:8px;
+                  border-top:0.5px solid #E8E6DF;font-size:13px;color:#5F5E5A">
+        <strong style="color:#2C2C2A">Sample source:</strong> ${sampleSource}
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="sec-label">AI model prediction vs confirmed diagnosis</div>
+      <div class="comparison">${modelCard}${truthCard}</div>
+    </div>
+
+    <div class="outcome-banner ${outCls}">
+      <div class="outcome-hl">${outHL}</div>
+      <div class="outcome-sub">${outSub}</div>
+    </div>
+
+    <div class="section">
+      <div class="sec-label">How the AI model made its decision</div>
+      <div class="reasoning-narrative">${r.narrative}</div>
+      ${bulletsHtml}
+      ${voteBar}
+      <div style="font-size:13px;font-weight:600;color:#5F5E5A;
+                  margin-bottom:10px;margin-top:4px">
+        Top 3 genes driving this decision
+      </div>
+      <div class="top-drivers">${driverCards}</div>
+      ${mismatchHtml}
+    </div>
+
+    <div class="section">
+      <div class="sec-label">Full gene breakdown</div>
+      <div class="gene-hint">
+        Red bar = pushing toward disease &nbsp;\u00b7&nbsp;
+        Green bar = pushing toward healthy &nbsp;\u00b7&nbsp;
+        Signal strength = how much the AI relied on this gene for this patient &nbsp;\u00b7&nbsp;
+        Model weight = how important this gene is across all patients
+      </div>
+      <div style="overflow-x:auto">
+        <table>
+          <thead><tr>
+            <th>Gene</th><th>Plain name</th><th>Role</th>
+            <th>Activity level</th><th>Signal strength</th>
+            <th>Direction</th><th>Model weight</th>
+          </tr></thead>
+          <tbody>${geneRows}</tbody>
+        </table>
+      </div>
+    </div>
+
+    <div style="padding:10px 22px;background:#F9F8F5;display:flex;
+                align-items:center;border-top:0.5px solid #E8E6DF">
+      <span style="font-size:12px;color:#888">
+        Card #${card.cardNum} \u00b7 ${card.dataset} \u00b7
+        ${session.total} card${session.total!==1?'s':''} shown this session
+      </span>
+    </div>`;
+}
+
+function showSummary(){
+  const el = document.getElementById('summary');
+  document.getElementById('dash').style.display='none';
+  el.style.display='block';
+  if(session.total===0){
+    el.innerHTML=`<div class="sum-head"><h2>No cards shown yet.</h2></div>`;
+    return;
+  }
+  const pct = Math.round(session.correct/session.total*100);
+  const logRows = session.log.map(e=>{
+    const ic=e.match?'\u2713':'\u2717';
+    const cc=e.match?'#27500A':'#A32D2D';
+    return `<tr>
+      <td style="color:#888">#${e.cardNum}</td>
+      <td style="font-family:monospace;font-size:11px;color:#5F5E5A">${e.sampleId.slice(0,16)}</td>
+      <td>${e.modelLabel}</td>
+      <td>${e.truthLabel}</td>
+      <td style="text-align:center;font-weight:700;color:${cc}">${ic}</td>
+    </tr>`;
+  }).join('');
+  el.innerHTML=`
+    <div class="sum-head">
+      <h2>Session summary</h2>
+      <p>${session.total} cards shown \u00b7 AutophagyNet Booth</p>
+    </div>
+    <div class="stat-grid">
+      <div class="stat-cell">
+        <div class="stat-label">Cards shown</div>
+        <div class="stat-num">${session.total}</div>
+      </div>
+      <div class="stat-cell">
+        <div class="stat-label">AI model correct</div>
+        <div class="stat-num" style="color:#185FA5">
+          ${session.correct}
+          <span class="stat-sub"> / ${session.total} (${pct}%)</span>
+        </div>
+      </div>
+      <div class="stat-cell">
+        <div class="stat-label">AI model wrong</div>
+        <div class="stat-num" style="color:#A32D2D">
+          ${session.total-session.correct}
+          <span class="stat-sub"> / ${session.total}</span>
+        </div>
+      </div>
+    </div>
+    <div class="log-wrap">
+      <div style="font-size:10px;font-weight:500;color:#888;
+                  text-transform:uppercase;letter-spacing:.06em;
+                  margin-bottom:10px">Session log</div>
+      <table>
+        <thead><tr>
+          <th>#</th><th>Sample</th><th>AI predicted</th>
+          <th>Confirmed diagnosis</th><th>Result</th>
+        </tr></thead>
+        <tbody>${logRows}</tbody>
+      </table>
+    </div>`;
+}
+
+function resetSession(){
+  session={total:0,correct:0,log:[]};
+  document.getElementById('dash').style.display='none';
+  document.getElementById('summary').style.display='none';
+}
+
+buildRegistry();
+</script>
+</body>
+</html>"""
+
+html_output = HTML_TEMPLATE.replace('CARDS_JSON_PLACEHOLDER', cards_json)
+
+output_file = "booth_game.html"
+with open(output_file, "w", encoding="utf-8") as f:
+    f.write(html_output)
+
+size_kb = len(html_output.encode()) // 1024
+print(f"\nSaved: {output_file}  ({size_kb} KB)")
+print("Open in Chrome. No internet, no Python needed.")
+display(FileLink(output_file, result_html_prefix="Download: "))
